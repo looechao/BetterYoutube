@@ -137,8 +137,8 @@
             display: block !important;
         }
 
-        .right-container-inner {
-            padding-bottom: clamp(16px, 2vh, 28px) !important;
+        .right-container {
+            padding-bottom: clamp(38px, 2vh, 50px) !important;
             margin-bottom: 0 !important;
         }
 
