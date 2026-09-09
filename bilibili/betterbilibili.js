@@ -1,366 +1,263 @@
 // ==UserScript==
-// @name         better-bilibili
-// @namespace    http://tampermonkey.net/
-// @version      5.2
-// @description  Hide recommendations and reorganize layout
-// @author       looechao
+// @name         Bilibili Tabview
+// @namespace    looechao
+// @version      1.1.1
+// @description  B 站视频页右栏改成 简介 / 合集 / 评论 / 视频 标签页，面板钉住不随页滚，隐藏广告（仿 Tabview YouTube）
 // @match        https://www.bilibili.com/video/*
+// @match        https://www.bilibili.com/list/*
 // @icon         https://www.bilibili.com/favicon.ico
+// @run-at       document-idle
 // @grant        none
 // ==/UserScript==
 
-(function () {
-    'use strict';
-    const TAG = '[Layout]';
+(() => {
+  'use strict';
+
+  const RIGHT_W = 420;
+  const TOP = 64;                 // B 站顶栏高度
+  const STORE_KEY = 'btv-tab';
+
+  // 标签 → 右栏里对应的节点。合集和推荐都住在 .rcmd-tab 这层壳里，留在 Vue 原位不搬，只用 CSS 显隐；
+  // 简介/标签/评论是从左栏搬过来的（#commentapp 是独立挂载点，简介和标签有固定 id/class，Vue 原地 patch 不重建）。
+  const TABS = [
+    { name: '简介', sel: '#btv-desc' },
+    { name: '合集', sel: '.video-pod' },
+    { name: '评论', sel: '#commentapp' },
+    { name: '视频', sel: '.recommend-list-v1' },
+  ];
+
+  const css = `
+    /* 广告 */
+    .slide-ad-exp,.activity-m-v1,.video-card-ad-small,.ad-report,.ad-floor-exp,.vcd,
+    .right-container-inner .right-bottom-banner{display:none!important}
+    .rcmd-tab:empty{display:none!important}
+    /* 弹幕列表不再作为标签，整个藏掉 */
+    .right-container-inner .video-pod-above-modules{display:none!important}
+
+    /* 布局：右栏加宽。注意左栏宽度绝对不能动——B 站是先按窗口和高度算出播放器尺寸，再把左栏设成播放器那么宽；
+       强行把左栏撑宽只会让播放器右边留出一条黑色空白（#playerWrap 的黑底）。
+       右栏宽度取「本来就空着的富余空间」，最多 ${RIGHT_W}px、最少还原成 B 站的 350px，由 JS 写进 --btv-rw */
+    .video-container-v1 .right-container{width:var(--btv-rw,350px)!important;flex:0 0 auto}
+    /* 播放器尺寸不碰：B 站按窗口宽算的播放器会比缩窄后的左栏宽几个像素，吃进 30px 的栏间距里看不出来；
+       强行 width:100% 会把宽屏模式一起废掉 */
+    /* 面板整体钉住不动：UP 主卡片和标签栏固定，只有下面当前那个内容块自己滚（当前标签之外的块是 display:none，不参与 flex）。
+       普通模式用 position:fixed 而不是 sticky —— sticky 只能在父元素高度范围内粘住，而面板正好等于一屏高，
+       父元素没有多余高度，页面一滚面板就整块被带走。fixed 之后右栏在文档流里高度归零，页面也就不再有多余滚动空间了。
+       横向位置由 JS 写进 --btv-rx（跟着右栏原本的位置走）。 */
+    .right-container-inner{height:calc(100vh - ${TOP}px);display:flex!important;flex-direction:column;overflow:hidden!important}
+    html:not(.btv-wide) .right-container-inner{position:fixed!important;top:${TOP}px!important;left:var(--btv-rx,auto)!important;width:var(--btv-rw,350px)!important}
+    /* 面板脱离文档流后右栏高度归零，页面底部会露出灰色页面底色；把右栏在流里的高度补回一屏 */
+    html:not(.btv-wide) .video-container-v1 .right-container{height:calc(100vh - ${TOP}px)}
+    .right-container-inner>.up-panel-container,.right-container-inner>#btv-tabs{flex:0 0 auto}
+    /* flex-basis 用 0，让当前显示的那块正好填满剩余高度（用 auto 会按内容分配，评论区会短一截）。
+       B 站给面板留了 250px 的 padding-bottom（原本是给固定评论框腾位置的），这里压掉，否则白白吃掉一截高度 */
+    .right-container-inner>*:not(.up-panel-container):not(#btv-tabs){flex:1 1 0;min-height:0;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin}
+    .right-container-inner{padding-bottom:12px!important}
+
+    /* B 站给 .right-container 设了 pointer-events:none，自建/搬来的节点要显式打开 */
+    #btv-tabs,#btv-desc,.right-container-inner #commentapp{pointer-events:auto}
+    /* 标签栏 + 内容合成一张带边框的卡片（仿 YouTube Tabview），直角无圆角。
+       margin 归零后 UP 卡片底边正好接上标签栏，卡片顶边与播放器顶边齐平 */
+    #btv-tabs{display:flex;gap:4px;margin:0;background:var(--bg1,#fff);position:sticky;top:0;z-index:5;
+      border:1px solid var(--line_regular,#e3e5e7);box-sizing:border-box}
+    .right-container-inner>*:not(.up-panel-container):not(#btv-tabs){border:1px solid var(--line_regular,#e3e5e7);border-top:0;box-sizing:border-box}
+    #btv-tabs button{flex:1;border:0;background:none;padding:8px 0;font-size:14px;color:#61666d;cursor:pointer;border-bottom:2px solid transparent}
+    #btv-tabs button:hover{color:#00aeec}
+    #btv-tabs button.on{color:#00aeec;border-bottom-color:#00aeec;font-weight:600}
+    #btv-tabs button[hidden]{display:none}
+
+    /* 简介/合集/视频 这三块是 B 站按整页布局做的，塞进卡片后内容几乎贴着边框；
+       补一点左右内边距，让缩进和评论区看齐（评论正文离边框约 15px） */
+    #btv-desc{padding:12px 14px}
+    .right-container-inner>.rcmd-tab{padding:0 7px;box-sizing:border-box}
+    #btv-desc .video-desc-container{margin:0!important}
+    /* 简介永远展开：B 站是用内联 height 把它压成两行再配一个「展开」按钮的，两套 class 名都盖掉 */
+    #btv-desc .basic-desc-info,#btv-desc .desc-info{height:auto!important;max-height:none!important;-webkit-line-clamp:none!important}
+    #btv-desc .toggle-btn{display:none!important}
+    #btv-desc .video-tag-container{margin-top:12px!important}
+    .right-container-inner #commentapp{width:100%!important;padding:4px 8px 0;box-sizing:border-box}
+    .right-container-inner .video-pod{margin-top:8px}
+    /* 合集列表 B 站限高 250px 内部滚动；面板本身会滚，所以放开让它全部展开 */
+    .right-container-inner .video-pod__body{max-height:none!important;height:auto!important}
+    /* B 站有时仍会把评论输入框「传送」到 .right-container 下一个 width:0 的固定层里（文字被挤成一列）；
+       藏掉这个容器，下面的 JS 再把输入框搬回评论区头部 */
+    .right-container>.bili-comments-bottom-fixed-wrapper{display:none!important}
+
+    /* 宽屏模式（仿 Tabview 的剧场模式）：两栏换行，播放器铺满整行，标签面板整行宽放在播放器下面、自己滚。
+       B 站宽屏时播放器宽高是按窗口算死的，这里改成跟着左栏走，高度 = 宽*9/16 + 46px 控制栏，由 JS 写进 --btv-ph */
+    html.btv-wide .video-container-v1{flex-wrap:wrap}
+    html.btv-wide .video-container-v1 .left-container{width:100%!important;position:relative!important;top:0!important}
+    html.btv-wide .video-container-v1 .right-container{width:100%!important;margin-left:0!important;margin-top:0!important}
+    html.btv-wide #btv-tabs{margin-top:0}
+    html.btv-wide .left-container>*:empty{margin:0!important}
+    /* 宽屏下 UP 卡片是绝对定位跑到页面右上角的，面板若还 overflow:hidden 会把它裁掉——
+       内容块各自有滚动条，这里放开不影响布局 */
+    html.btv-wide .right-container-inner{position:sticky!important;top:${TOP}px!important;overflow:visible!important}
+    html.btv-wide #btv-tabs{top:0}
+    /* 宽屏时 UP 主卡片留在页面右上角（B 站原位），不跟面板一起掉到播放器下面；
+       它的包含块是 .right-container，所以要用 JS 算出负的 top 把它顶回标题那一行 */
+    html.btv-wide .video-container-v1{position:relative}
+    html.btv-wide .up-panel-container{position:absolute;top:var(--btv-up,0px);right:0;width:var(--btv-rw,350px);pointer-events:auto}
+    html.btv-wide #playerWrap,html.btv-wide #bilibili-player,html.btv-wide .bpx-player-container[data-screen="wide"]{width:100%!important;height:var(--btv-ph)!important}
+
+    ${TABS.map(t => `html[data-btv-tab]:not([data-btv-tab="${t.name}"]) .right-container-inner ${t.sel}{display:none!important}`).join('\n')}
+    /* 合集和推荐视频同住在 .rcmd-tab 里，而且是并排的两个兄弟节点：
+       壳在「合集」或「视频」任一标签下显示，壳里两块各自按标签显隐（否则看合集时下面会跟着一长条推荐） */
+    html[data-btv-tab]:not([data-btv-tab="合集"]):not([data-btv-tab="视频"]) .right-container-inner .rcmd-tab{display:none!important}
+    html[data-btv-tab="合集"] .right-container-inner .rcmd-tab>.recommend-list-v1,
+    html[data-btv-tab="视频"] .right-container-inner .rcmd-tab>.video-pod{display:none!important}
+  `;
+
+  const $ = (s, r = document) => r.querySelector(s);
+  let tabsEl = null;
+
+  function setTab(name) {
+    const btn = tabsEl.querySelector(`button[data-tab="${name}"]`);
+    if (!btn || btn.hidden) name = '评论';
+    document.documentElement.dataset.btvTab = name;
+    for (const b of tabsEl.children) b.classList.toggle('on', b.dataset.tab === name);
+    try { localStorage.setItem(STORE_KEY, name); } catch {}
+  }
+
+  // 把左栏的简介/标签/评论搬进右栏；B 站若重建了这些节点，观察到后再搬一次
+  function adopt() {
+    const inner = $('.right-container-inner');
+    if (!inner || !tabsEl) return;
+    try {
+      let desc = $('#btv-desc');
+      if (!desc) { desc = document.createElement('div'); desc.id = 'btv-desc'; tabsEl.after(desc); }
+      for (const sel of ['.video-desc-container', '.video-tag-container']) {
+        const el = $(sel);
+        if (el && el.parentElement !== desc) desc.appendChild(el);
+      }
+      const c = $('#commentapp');
+      if (c && c.parentElement !== inner) inner.appendChild(c);
+    } catch {}
+  }
+
+  // 评论区头部那行「评论 N  最热|最新」是 B 站给整页布局设计的大标题，塞进标签页里很突兀：
+  // 标签本身已经写着「评论」，所以把标题藏掉，只留排序开关靠右，并压掉它下面 22px 的 margin。
+  // 另外 B 站会在页面滚过评论框时把评论框「传送」到视口底部固定，判断依据是 window 滚动，
+  // 我们的评论区在自己的滚动容器里，这个判断会错乱，结果头部留一个空洞、框跑到屏幕底下。
+  // 组件暴露了 scrollContainer / commentBoxTeleportDisabled 两个属性，直接告诉它别传送。
+  function styleCommentHeader() {
+    const el = $('bili-comments')?.shadowRoot?.querySelector('bili-comments-header-renderer');
+    const hr = el?.shadowRoot;
+    if (!hr) return false;
+    try {
+      const sc = $('#commentapp');
+      if (sc && el.scrollContainer !== sc) el.scrollContainer = sc;
+      if (!el.commentBoxTeleportDisabled) el.commentBoxTeleportDisabled = true;
+      // 输入框被传送走了就搬回来（切标签让评论区 display:none 时最容易触发）
+      if (!hr.querySelector('#commentbox')?.children.length && typeof el.revertTeleportCommentbox === 'function') el.revertTeleportCommentbox();
+    } catch {}
+    if (!hr.querySelector('#btv-hdr')) {
+      const st = document.createElement('style');
+      st.id = 'btv-hdr';
+      st.textContent = '#navbar{justify-content:flex-end;padding:0 8px;margin-bottom:4px!important;min-height:0}#title{display:none!important}';
+      hr.appendChild(st);
+    }
+    return true;
+  }
+
+  // 宽屏切换：跟着播放器的 data-screen 走；切换后让播放器重算尺寸，并把面板滚回顶部。
+  // 只认 normal / wide 两个值：播放器滚出视口时 B 站会把它切成 mini（小窗），全屏是 web / full，
+  // 这些都不是用户在换布局，布局必须保持不动——否则 mini 一出现布局塌回两栏、滚动位置跳掉、播放器又回到视口，来回抽搐。
+  let lastWide = null;
+  function layoutWide() {
+    const p = $('.bpx-player-container'), pw = $('#playerWrap'), inner = $('.right-container-inner');
+    if (!p || !pw || !inner) return;
+    const screen = p.dataset.screen;
+    if (screen !== 'wide' && screen !== 'normal') return;
+    const wide = screen === 'wide';
+    document.documentElement.classList.toggle('btv-wide', wide);
+    const rc0 = $('.right-container'), lc0 = $('.left-container'), vc0 = $('.video-container-v1');
+    if (rc0 && lc0 && vc0) {
+      const root0 = document.documentElement.style;
+      if (!wide) {
+        // 富余空间 = 整行宽 - 左栏（播放器）宽 - 栏间距，超出的部分才用来加宽右栏
+        const slack = vc0.clientWidth - lc0.offsetWidth - 30;
+        root0.setProperty('--btv-rw', Math.round(Math.max(350, Math.min(RIGHT_W, slack))) + 'px');
+      }
+      root0.setProperty('--btv-rx', Math.round(rc0.getBoundingClientRect().left) + 'px');
+    }
+    if (wide !== lastWide) {
+      lastWide = wide;
+      inner.scrollTop = 0;
+      window.dispatchEvent(new Event('resize'));
+    }
+    if (wide) {
+      const root = document.documentElement.style;
+      root.setProperty('--btv-ph', Math.round(pw.getBoundingClientRect().width * 9 / 16 + 46) + 'px');
+      const rc = $('.right-container'), vc = $('.video-container-v1');
+      if (rc && vc) root.setProperty('--btv-up', (vc.getBoundingClientRect().top - rc.getBoundingClientRect().top) + 'px');
+    }
+  }
+
+  // 哪些标签该显示（比如没合集就不显示合集）；当前标签没了就退回评论
+  function refresh() {
+    const inner = $('.right-container-inner');
+    if (!inner) return;
+    for (const b of tabsEl.children) {
+      const t = TABS.find(t => t.name === b.dataset.tab);
+      const el = inner.querySelector(t.sel);
+      b.hidden = !el || (t.name === '简介' && !el.children.length);
+    }
+    const cur = tabsEl.querySelector(`button[data-tab="${document.documentElement.dataset.btvTab}"]`);
+    if (!cur || cur.hidden) setTab('评论');
+  }
+
+  function build() {
+    if (tabsEl) return true;
+    const inner = $('.right-container-inner');
+    if (!inner || !$('#commentapp') || !$('.up-panel-container')) return false;
 
     const style = document.createElement('style');
-    style.textContent = `
-        /* 隐藏广告 */
-        .slide-ad-exp,
-        .activity-m-v1,
-        .video-card-ad-small,
-        .ad-report,
-        .ad-floor-exp,
-        .vcd {
-            display: none !important;
-        }
-
-        /* 隐藏推荐但保留 video-pod */
-        .rcmd-tab > :not(.video-pod) {
-            display: none !important;
-        }
-
-        .rcmd-tab:empty {
-            display: none !important;
-        }
-
-        /* 简介永远展开 */
-        .basic-desc-info {
-            height: auto !important;
-            max-height: none !important;
-        }
-
-        .video-desc-container .toggle-btn {
-            display: none !important;
-        }
-
-        /* 标签页容器 */
-        #bili-custom-tabs {
-            margin-top: 16px;
-            margin-left: 0;
-            background: #fff;
-            border-radius: 8px;
-            overflow: visible !important;
-            position: relative;
-            z-index: 9999 !important;
-        }
-
-        .bili-tab-header {
-            display: flex;
-            border-bottom: 1px solid #e3e5e7;
-            position: relative;
-            z-index: 10000 !important;
-            background: #fff;
-        }
-
-        .bili-tab-btn {
-            flex: 1;
-            padding: 12px;
-            text-align: center;
-            cursor: pointer !important;
-            background: #fff;
-            border: none;
-            font-size: 14px;
-            transition: 0.2s;
-            position: relative;
-            z-index: 10001 !important;
-            pointer-events: auto !important;
-            user-select: none;
-        }
-
-        .bili-tab-btn:hover {
-            background: #f4f4f4 !important;
-        }
-
-        .bili-tab-btn.active {
-            background: #F4F4F4 !important;
-            color: #000000 !important;
-        }
-
-        #bili-tab-content {
-            position: relative;
-            min-height: 350px;
-            padding: 16px;
-            padding-bottom: 8px;
-            z-index: 1;
-        }
-
-        /* 内容显示控制 */
-        .video-desc-container,
-        .video-tag-container,
-        #commentapp {
-            display: none;
-        }
-
-        .video-desc-container.tab-visible,
-        .video-tag-container.tab-visible,
-        #commentapp.tab-visible {
-            display: block !important;
-        }
-
-        .video-tag-container.tab-visible {
-            margin-top: 16px !important;
-        }
-
-        /* video-pod 包装器 */
-        .video-pod-wrapper {
-            display: none;
-            margin-left: -16px;
-            margin-bottom: 16px;
-        }
-
-        .video-pod-wrapper.tab-visible {
-            display: block !important;
-        }
-
-        .video-pod-wrapper .video-pod {
-            width: 100% !important;
-            max-width: none !important;
-        }
-
-        /* danmaku-box 包装器 */
-        .danmaku-box-wrapper {
-            display: none;
-        }
-
-        .danmaku-box-wrapper.tab-visible {
-            display: block !important;
-        }
-
-        .right-container {
-            padding-bottom: clamp(38px, 2vh, 50px) !important;
-            margin-bottom: 0 !important;
-        }
-
-        /* 修复图片懒加载 */
-        #bili-custom-tabs img[data-src] {
-            content: attr(data-src);
-        }
-    `;
+    style.id = 'btv-style';
+    style.textContent = css;
     document.head.appendChild(style);
 
-    // 修复懒加载图片
-    function fixLazyImages(container) {
-        const images = container.querySelectorAll('img[data-src], img.lazy-img');
-        images.forEach(img => {
-            if (img.dataset.src && (!img.src || img.src === 'about:blank')) {
-                img.src = img.dataset.src;
-            }
-            img.classList.remove('lazy-img');
-        });
+    tabsEl = document.createElement('div');
+    tabsEl.id = 'btv-tabs';
+    for (const t of TABS) {
+      const b = document.createElement('button');
+      b.textContent = t.name;
+      b.dataset.tab = t.name;
+      b.onclick = () => { setTab(t.name); inner.scrollTop = 0; };
+      tabsEl.appendChild(b);
     }
+    $('.up-panel-container').after(tabsEl);
 
-    function init() {
-        const rightContainer = document.querySelector('.right-container');
-        const upPanel = document.querySelector('.up-panel-container');
-        if (!rightContainer || !upPanel || document.querySelector('#bili-custom-tabs')) {
-            return false;
-        }
+    adopt();
+    let initial = '评论';
+    try { initial = localStorage.getItem(STORE_KEY) || initial; } catch {}
+    setTab(initial);
+    refresh();
+    layoutWide();
 
-        console.log(TAG, 'initializing');
+    // shadow DOM 里的变化观察不到，评论组件又是异步挂载的，轮询到注入成功为止
+    let hdrTries = 0;
+    const hdrTimer = setInterval(() => { if (styleCommentHeader() || ++hdrTries > 60) clearInterval(hdrTimer); }, 500);
 
-        // 提前抓取元素
-        const videoPod = document.querySelector('.rcmd-tab .video-pod');
-        const danmakuBox = document.querySelector('.danmaku-box');
+    let pending = 0;
+    new MutationObserver(() => {
+      if (pending) return;
+      pending = setTimeout(() => { pending = 0; adopt(); refresh(); layoutWide(); styleCommentHeader(); }, 100);
+    }).observe($('.video-container-v1') || document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['data-screen'] });
+    window.addEventListener('resize', layoutWide);
+    return true;
+  }
 
-        // 创建标签页
-        const tabContainer = document.createElement('div');
-        tabContainer.id = 'bili-custom-tabs';
-
-        const header = document.createElement('div');
-        header.className = 'bili-tab-header';
-
-        const btn1 = document.createElement('button');
-        btn1.className = 'bili-tab-btn active';
-        btn1.textContent = '简介';
-        btn1.type = 'button';
-
-        const btn2 = document.createElement('button');
-        btn2.className = 'bili-tab-btn';
-        btn2.textContent = '评论';
-        btn2.type = 'button';
-
-        const btn3 = document.createElement('button');
-        btn3.className = 'bili-tab-btn';
-        btn3.textContent = '弹幕';
-        btn3.type = 'button';
-
-        header.appendChild(btn1);
-        header.appendChild(btn2);
-        header.appendChild(btn3);
-
-        const content = document.createElement('div');
-        content.id = 'bili-tab-content';
-
-        tabContainer.appendChild(header);
-        tabContainer.appendChild(content);
-        upPanel.after(tabContainer);
-
-        // 插入内容:video-pod
-        if (videoPod) {
-            const podWrapper = document.createElement('div');
-            podWrapper.className = 'video-pod-wrapper tab-visible';
-            podWrapper.appendChild(videoPod);
-            content.appendChild(podWrapper);
-
-            // 立即修复图片
-            fixLazyImages(videoPod);
-            console.log(TAG, 'video-pod moved');
-        }
-
-        // 插入内容:简介和标签
-        const descContainer = document.querySelector('.video-desc-container');
-        const tagContainer = document.querySelector('.video-tag-container');
-        if (descContainer) {
-            descContainer.classList.add('tab-visible');
-            content.appendChild(descContainer);
-        }
-        if (tagContainer) content.appendChild(tagContainer);
-
-        // 插入内容:评论
-        const commentApp = document.querySelector('#commentapp');
-        if (commentApp) content.appendChild(commentApp);
-
-        // 插入内容:弹幕
-        if (danmakuBox) {
-            const danmakuWrapper = document.createElement('div');
-            danmakuWrapper.className = 'danmaku-box-wrapper';
-            danmakuWrapper.appendChild(danmakuBox);
-            content.appendChild(danmakuWrapper);
-            console.log(TAG, 'danmaku-box moved');
-        }
-
-        // 标签切换
-        function switchTab(target) {
-            btn1.classList.toggle('active', target === 'desc');
-            btn2.classList.toggle('active', target === 'comments');
-            btn3.classList.toggle('active', target === 'danmaku');
-
-            const podWrapper = content.querySelector('.video-pod-wrapper');
-            if (podWrapper) podWrapper.classList.toggle('tab-visible', target === 'desc');
-
-            if (descContainer) descContainer.classList.toggle('tab-visible', target === 'desc');
-            if (tagContainer) tagContainer.classList.toggle('tab-visible', target === 'desc');
-            if (commentApp) {
-                commentApp.classList.toggle('tab-visible', target === 'comments');
-                // 切换到评论时修复图片
-                if (target === 'comments') {
-                    setTimeout(() => fixLazyImages(commentApp), 100);
-                }
-            }
-
-            // 弹幕显示控制
-            const danmakuWrapper = content.querySelector('.danmaku-box-wrapper');
-            if (danmakuWrapper) danmakuWrapper.classList.toggle('tab-visible', target === 'danmaku');
-
-            console.log(TAG, 'tab:', target);
-        }
-
-        btn1.onclick = () => switchTab('desc');
-        btn2.onclick = () => switchTab('comments');
-        btn3.onclick = () => {
-            switchTab('danmaku');
-
-            // 延迟执行,确保 DOM 已更新
-            setTimeout(() => {
-                const collapseWrap = document.querySelector('.danmaku-box-wrapper .bui-collapse-wrap');
-                if (collapseWrap?.classList.contains('bui-collapse-wrap-folded')) {
-                    const header = collapseWrap.querySelector('.bui-collapse-header');
-                    header?.click();
-                    console.log(TAG, 'danmaku expanded');
-                }
-            }, 150);
-        };
-
-        switchTab('desc');
-
-        console.log(TAG, 'done');
-
-        setupLateVideoPodDetection(content);
-        setupLateDanmakuDetection(content);
-
-        // 初始化完成后修复所有图片
-        setTimeout(() => {
-            fixLazyImages(document.querySelector('#bili-custom-tabs'));
-        }, 500);
-
-        return true;
-    }
-
-    function setupLateVideoPodDetection(content) {
-        const observer = new MutationObserver(() => {
-            const videoPod = document.querySelector('.rcmd-tab .video-pod');
-            const existingPod = content?.querySelector('.video-pod-wrapper');
-            if (videoPod && content && !existingPod) {
-                const podWrapper = document.createElement('div');
-                podWrapper.className = 'video-pod-wrapper tab-visible';
-                podWrapper.appendChild(videoPod);
-                content.insertBefore(podWrapper, content.firstChild);
-
-                // 修复图片
-                fixLazyImages(videoPod);
-                console.log(TAG, 'late video-pod detected');
-            }
-        });
-
-        observer.observe(document.body, { childList: true, subtree: true });
-        setTimeout(() => observer.disconnect(), 15000);
-    }
-
-    function setupLateDanmakuDetection(content) {
-        const observer = new MutationObserver(() => {
-            const danmakuBox = document.querySelector('.danmaku-box');
-            const existingDanmaku = content?.querySelector('.danmaku-box-wrapper');
-            if (danmakuBox && content && !existingDanmaku) {
-                const danmakuWrapper = document.createElement('div');
-                danmakuWrapper.className = 'danmaku-box-wrapper';
-                danmakuWrapper.appendChild(danmakuBox);
-                content.appendChild(danmakuWrapper);
-                console.log(TAG, 'late danmaku-box detected');
-            }
-        });
-
-        observer.observe(document.body, { childList: true, subtree: true });
-        setTimeout(() => observer.disconnect(), 15000);
-    }
-
-    // 页面导航监听（处理单页应用）
-    let lastUrl = location.href;
-    setInterval(() => {
-        if (location.href !== lastUrl) {
-            lastUrl = location.href;
-            console.log(TAG, 'page changed, reinitializing');
-
-            // 移除旧的标签页
-            const oldTabs = document.querySelector('#bili-custom-tabs');
-            if (oldTabs) oldTabs.remove();
-
-            // 重新初始化
-            setTimeout(() => {
-                let count = 0;
-                const interval = setInterval(() => {
-                    if (init() || count++ > 30) clearInterval(interval);
-                }, 500);
-            }, 1000);
-        }
-    }, 1000);
-
-    window.addEventListener('load', () => {
-        setTimeout(() => {
-            let count = 0;
-            const interval = setInterval(() => {
-                if (init() || count++ > 30) clearInterval(interval);
-            }, 500);
-        }, 1000);
-    });
+  // 一定要等页面「加载完 + 可见 + 再静置一会儿」才动 DOM。
+  // 在后台标签页打开视频时 B 站会推迟渲染，等你切过去才继续挂载；如果这期间我们已经把
+  // 简介/评论这些节点搬走了，Vue 续上的那次 patch 会撞上不在原位的节点直接抛异常
+  // （HierarchyRequestError / $scopedSlots of undefined），整页后续渲染就此中断——
+  // 表现是头像一直骨架屏、评论组件永不挂载、播放器尺寸也停在旧值不再重算。
+  let readyAt = 0, tries = 0;
+  const timer = setInterval(() => {
+    if (document.readyState !== 'complete' || document.hidden) { readyAt = 0; return; }
+    if (!readyAt) { readyAt = Date.now(); return; }
+    if (Date.now() - readyAt < 600) return;
+    if (build() || ++tries > 200) clearInterval(timer);
+  }, 200);
 })();
