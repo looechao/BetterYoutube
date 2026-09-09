@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bilibili Tabview
 // @namespace    looechao
-// @version      1.2.0
+// @version      1.2.1
 // @description  B 站视频页右栏改成 简介 / 合集 / 评论 / 视频 标签页，面板钉住不随页滚，隐藏广告（仿 Tabview YouTube）
 // @match        https://www.bilibili.com/video/*
 // @match        https://www.bilibili.com/list/*
@@ -266,16 +266,26 @@
     return true;
   }
 
-  // 一定要等页面「加载完 + 可见 + 再静置一会儿」才动 DOM。
-  // 在后台标签页打开视频时 B 站会推迟渲染，等你切过去才继续挂载；如果这期间我们已经把
-  // 简介/评论这些节点搬走了，Vue 续上的那次 patch 会撞上不在原位的节点直接抛异常
-  // （HierarchyRequestError / $scopedSlots of undefined），整页后续渲染就此中断——
-  // 表现是头像一直骨架屏、评论组件永不挂载、播放器尺寸也停在旧值不再重算。
-  let readyAt = 0, tries = 0;
+  // 什么时候才敢动 DOM，是这个脚本最要紧的一件事。
+  // 教训：在后台标签页打开视频时 B 站会推迟渲染，等你切过去才继续挂载。我们一旦在这期间把
+  // 简介/评论这些节点搬走，Vue 续上的那次 patch 就会撞上不在原位的节点直接抛异常
+  // （HierarchyRequestError / $scopedSlots of undefined），整页后续渲染全部中断——
+  // 表现是头像卡在骨架屏、评论组件永不挂载、顶栏用户区也不出来，看着就像「加载卡住」。
+  // 只靠「可见后再等 N 毫秒」不够：B 站补渲染要多久没有定数，等 250ms 或 600ms 都可能不够。
+  // 所以改成等一个「内容信号」——UP 主卡片里的关注/充电按钮出现，说明那一轮渲染真的跑完了。
+  function pageSettled() {
+    const up = $('.up-panel-container');
+    return !!(up && up.querySelector('.default-btn, .follow-btn') && $('.right-container-inner') && $('#commentapp'));
+  }
+
+  let settledAt = 0, tries = 0, waited = 0;
   const timer = setInterval(() => {
-    if (document.readyState !== 'complete' || document.hidden) { readyAt = 0; return; }
-    if (!readyAt) { readyAt = Date.now(); return; }
-    if (Date.now() - readyAt < 250) return;
+    waited += 100;
+    if (document.readyState !== 'complete' || document.hidden) { settledAt = 0; return; }
+    // 信号迟迟不来也别干等（比如 B 站改版换了按钮 class），10 秒后照常构建
+    if (!pageSettled() && waited < 10000) { settledAt = 0; return; }
+    if (!settledAt) { settledAt = Date.now(); return; }
+    if (Date.now() - settledAt < 150) return;
     if (build() || ++tries > 200) clearInterval(timer);
   }, 100);
 })();
