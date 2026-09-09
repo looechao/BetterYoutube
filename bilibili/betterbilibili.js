@@ -1,12 +1,12 @@
 // ==UserScript==
 // @name         Bilibili Tabview
 // @namespace    looechao
-// @version      1.1.1
+// @version      1.2.0
 // @description  B 站视频页右栏改成 简介 / 合集 / 评论 / 视频 标签页，面板钉住不随页滚，隐藏广告（仿 Tabview YouTube）
 // @match        https://www.bilibili.com/video/*
 // @match        https://www.bilibili.com/list/*
 // @icon         https://www.bilibili.com/favicon.ico
-// @run-at       document-idle
+// @run-at       document-start
 // @grant        none
 // ==/UserScript==
 
@@ -107,6 +107,24 @@
     html[data-btv-tab="合集"] .right-container-inner .rcmd-tab>.recommend-list-v1,
     html[data-btv-tab="视频"] .right-container-inner .rcmd-tab>.video-pod{display:none!important}
   `;
+
+  // 先手：脚本改到 document-start 运行，一进来就注入这段「过渡样式」。它不碰 DOM，纯 CSS，没有撞 Vue 的风险，
+  // 却能在 B 站第一帧就生效。
+  // 目的是别让 B 站原样式先完整画一遍再被我们替换掉——推荐流长长一条渲染出来又消失、
+  // 简介和评论在左栏闪一下再被搬走，就是那个「官方页面 → 我们页面」的替换感。
+  // 全部用 html:not([data-btv-tab]) 限定：面板一建好我们就会写上这个属性，这段样式随即自动失效。
+  const preCss = `
+    html:not([data-btv-tab]) .right-container-inner .recommend-list-v1,
+    html:not([data-btv-tab]) .right-container-inner .video-pod-above-modules,
+    .slide-ad-exp,.activity-m-v1,.video-card-ad-small,.ad-report,.ad-floor-exp,.vcd{display:none!important}
+    html:not([data-btv-tab]) .left-container .video-desc-container,
+    html:not([data-btv-tab]) .left-container .video-tag-container,
+    html:not([data-btv-tab]) .left-container #commentapp{visibility:hidden}
+  `;
+  const preStyle = document.createElement('style');
+  preStyle.id = 'btv-pre';
+  preStyle.textContent = preCss;
+  (document.head || document.documentElement).appendChild(preStyle);
 
   const $ = (s, r = document) => r.querySelector(s);
   let tabsEl = null;
@@ -257,7 +275,7 @@
   const timer = setInterval(() => {
     if (document.readyState !== 'complete' || document.hidden) { readyAt = 0; return; }
     if (!readyAt) { readyAt = Date.now(); return; }
-    if (Date.now() - readyAt < 600) return;
+    if (Date.now() - readyAt < 250) return;
     if (build() || ++tries > 200) clearInterval(timer);
-  }, 200);
+  }, 100);
 })();
