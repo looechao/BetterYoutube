@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bilibili Tabview
 // @namespace    looechao
-// @version      1.2.1
+// @version      1.2.2
 // @description  B 站视频页右栏改成 简介 / 合集 / 评论 / 视频 标签页，面板钉住不随页滚，隐藏广告（仿 Tabview YouTube）
 // @match        https://www.bilibili.com/video/*
 // @match        https://www.bilibili.com/list/*
@@ -271,19 +271,28 @@
   // 简介/评论这些节点搬走，Vue 续上的那次 patch 就会撞上不在原位的节点直接抛异常
   // （HierarchyRequestError / $scopedSlots of undefined），整页后续渲染全部中断——
   // 表现是头像卡在骨架屏、评论组件永不挂载、顶栏用户区也不出来，看着就像「加载卡住」。
-  // 只靠「可见后再等 N 毫秒」不够：B 站补渲染要多久没有定数，等 250ms 或 600ms 都可能不够。
-  // 所以改成等一个「内容信号」——UP 主卡片里的关注/充电按钮出现，说明那一轮渲染真的跑完了。
+  //
+  // 试过的两种门禁都不够：
+  //   1) 可见后等 250~600ms —— B 站补渲染要多久没有定数，等多久都是赌。
+  //   2) 等 .default-btn 出现 —— 这个节点在骨架屏阶段就已经在 DOM 里了，等于没等。
+  // 现在等三个都满足：评论组件已挂载（bili-comments 存在）、UP 主头像的 img 节点已建出、
+  // 关注/充电按钮在位。崩溃那次三项全为假（连 img 都没有），健康加载时三项同时成立。
+  // 注意别用 img[src]：头像是懒加载的，后台标签页里只有 data-src，会永远等不到。
   function pageSettled() {
     const up = $('.up-panel-container');
-    return !!(up && up.querySelector('.default-btn, .follow-btn') && $('.right-container-inner') && $('#commentapp'));
+    if (!up || !$('.right-container-inner') || !$('#commentapp')) return false;
+    if (!$('bili-comments')) return false;                       // 评论组件挂载完
+    if (!up.querySelector('.bili-avatar img')) return false;     // 头像节点真的建出来了（骨架屏阶段连 img 都没有）
+    if (!up.querySelector('.default-btn, .follow-btn')) return false;
+    return true;
   }
 
   let settledAt = 0, tries = 0, waited = 0;
   const timer = setInterval(() => {
     waited += 100;
     if (document.readyState !== 'complete' || document.hidden) { settledAt = 0; return; }
-    // 信号迟迟不来也别干等（比如 B 站改版换了按钮 class），10 秒后照常构建
-    if (!pageSettled() && waited < 10000) { settledAt = 0; return; }
+    // 信号迟迟不来也别干等（比如关闭了评论区、或 B 站改版换了 class），12 秒后照常构建
+    if (!pageSettled() && waited < 12000) { settledAt = 0; return; }
     if (!settledAt) { settledAt = Date.now(); return; }
     if (Date.now() - settledAt < 150) return;
     if (build() || ++tries > 200) clearInterval(timer);
