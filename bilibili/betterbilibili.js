@@ -1,10 +1,13 @@
 // ==UserScript==
 // @name         Bilibili Tabview
 // @namespace    looechao
-// @version      1.2.2
-// @description  B 站视频页右栏改成 简介 / 合集 / 评论 / 视频 标签页，面板钉住不随页滚，隐藏广告（仿 Tabview YouTube）
+// @version      1.2.5
+// @description  B 站视频页右栏标签化，主页三列精简布局，动态页纯色背景，隐藏广告（仿 Tabview YouTube）
+// @match        https://www.bilibili.com/
+// @match        https://www.bilibili.com/?*
 // @match        https://www.bilibili.com/video/*
 // @match        https://www.bilibili.com/list/*
+// @match        https://t.bilibili.com/*
 // @icon         https://www.bilibili.com/favicon.ico
 // @run-at       document-start
 // @grant        none
@@ -12,6 +15,76 @@
 
 (() => {
   'use strict';
+
+  // 主页只注入样式，不运行视频页的标签栏和轮询逻辑。
+  if (location.hostname === 'www.bilibili.com' && location.pathname === '/') {
+    const style = document.createElement('style');
+    style.id = 'btv-home-style';
+    style.textContent = `
+      /* 1. 左侧推广轮播 */
+      .recommended-swipe { display: none !important; }
+
+      /* 2. 直播推荐卡 */
+      .floor-single-card, .bili-live-card { display: none !important; }
+
+      /* 3. 右下浮动按钮、adblock 提示 */
+      .palette-button-wrap, .adblock-tips { display: none !important; }
+
+      /* 4. 顶部横幅压成纯色导航条 */
+      .bili-header__banner { height: 64px !important; min-height: 64px !important; background: #fff !important; }
+      .bili-header__banner .banner-img,
+      .bili-header__banner picture,
+      .bili-header__banner .animated-banner,
+      .bili-header__banner video { display: none !important; }
+      .bili-header .bili-header__bar { background: #fff !important; box-shadow: 0 1px 0 rgba(0,0,0,.06); }
+      .bili-header .bili-header__bar .left-entry a,
+      .bili-header .bili-header__bar .left-entry span,
+      .bili-header .bili-header__bar .right-entry a,
+      .bili-header .bili-header__bar .right-entry span,
+      .bili-header .bili-header__bar .right-entry div { color: #18191C !important; }
+      .bili-header .bili-header__bar svg { color: #18191C !important; fill: currentColor !important; }
+
+      /* 5. 三列布局 + 修掉轮播留下的 margin 错位 */
+      .container.is-version8 {
+        grid-template-columns: repeat(3, 1fr) !important;
+        column-gap: 16px !important;
+        row-gap: 40px !important;
+        align-items: start !important;
+      }
+      .container.is-version8 > .feed-card,
+      .container.is-version8 > .bili-feed-card,
+      .container.is-version8 > .floor-single-card { margin-top: 0 !important; }
+
+      /* 6. 背景 */
+      html, body { background-color: #F0F1F3 !important; }
+
+      /* 7. 标题 */
+      .bili-video-card__info--tit,
+      .bili-video-card__info--tit a {
+        font-size: 16px !important;
+        font-weight: 500 !important;
+        line-height: 23px !important;
+        color: #0F0F0F !important;
+        letter-spacing: 0 !important;
+      }
+      .bili-video-card__info--bottom,
+      .bili-video-card__info--owner { font-size: 13px !important; }
+    `;
+    (document.head || document.documentElement).appendChild(style);
+    return;
+  }
+
+  // 动态页只改背景，不运行视频页的标签栏和轮询逻辑。
+  if (location.hostname === 't.bilibili.com') {
+    const style = document.createElement('style');
+    style.id = 'btv-dynamic-background';
+    style.textContent = `
+      html, body, .bgc { background-color: #F0F1F3 !important; background-image: none !important; }
+      .bg { background-image: none !important; background-color: transparent !important; }
+    `;
+    (document.head || document.documentElement).appendChild(style);
+    return;
+  }
 
   const RIGHT_W = 420;
   const TOP = 64;                 // B 站顶栏高度
@@ -70,6 +143,9 @@
        补一点左右内边距，让缩进和评论区看齐（评论正文离边框约 15px） */
     #btv-desc{padding:12px 14px}
     .right-container-inner>.rcmd-tab{padding:0 7px;box-sizing:border-box}
+    ${location.pathname.startsWith('/video/') ? `
+    .right-container .right-container-inner .rcmd-tab{padding-left:20px!important;padding-right:20px!important}
+    ` : ''}
     #btv-desc .video-desc-container{margin:0!important}
     /* 简介永远展开：B 站是用内联 height 把它压成两行再配一个「展开」按钮的，两套 class 名都盖掉 */
     #btv-desc .basic-desc-info,#btv-desc .desc-info{height:auto!important;max-height:none!important;-webkit-line-clamp:none!important}
