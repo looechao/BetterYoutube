@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bilibili Tabview
 // @namespace    looechao
-// @version      1.6.0
+// @version      1.6.1
 // @description  B 站视频页/连播页右栏标签化，主页三列精简布局，动态页纯色背景，隐藏广告（仿 Tabview YouTube）
 // @match        https://www.bilibili.com/
 // @match        https://www.bilibili.com/?*
@@ -44,7 +44,7 @@
       .bili-header .bili-header__bar .right-entry a,
       .bili-header .bili-header__bar .right-entry span,
       .bili-header .bili-header__bar .right-entry div { color: #18191C !important; }
-      .bili-header .bili-header__bar svg { color: #18191C !important; fill: currentColor !important; }
+      .bili-header .bili-header__bar svg { color: #18191C !important; }
 
       /* 5. 三列布局 + 修掉轮播留下的 margin 错位 */
       .container.is-version8 {
