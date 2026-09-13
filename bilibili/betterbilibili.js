@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bilibili Tabview
 // @namespace    looechao
-// @version      1.6.2
+// @version      1.7.5
 // @description  B 站视频页/连播页右栏标签化，主页三列精简布局，动态页纯色背景，隐藏广告（仿 Tabview YouTube）
 // @match        https://www.bilibili.com/
 // @match        https://www.bilibili.com/?*
@@ -14,11 +14,60 @@
 // @grant        none
 // ==/UserScript==
 
+/* ── 1.7.0 改了什么（四处都是实测出来的，不是看代码猜的） ──────────────────
+   1. 首页分支的 hostname 比较写成了 markdown 链接形式，永远为 false。注释里写着「已修」，
+      代码其实没改，首页样式整整失效了一个版本；而且首页会掉进视频页逻辑空转三十多秒。
+   2. 轮询的 waited 计时放在可见性门禁之前，后台标签页里照样累加。于是「后台打开视频 →
+      二十秒后切回来」这条路径上 waited 早已 >12000，12 秒兜底直接短路掉 pageSettled，
+      立刻 build、立刻搬 DOM——下面那一大段注释防的就是这个崩溃，却被计时器自己放了进来。
+   3. MutationObserver 挂在整个 .video-container-v1 上，而 #playerWrap 就在它的 subtree 里。
+      实测播放中 4 秒收到 16 条记录，全部来自 .bpx-player-ctrl-time-current（时间码每 250ms
+      换一次文本节点），光这一个节点就让 sync 以 4Hz 常驻，每次带一组 getBoundingClientRect
+      强制回流，实测单次约 3.6ms。弹幕反而一条都不贡献（canvas 渲染，不走 DOM）。
+   4. 宽屏播放器比 B 站原生宽 148px。实测原生宽屏是「左栏 543 + 栏间距 30 + 右栏 350 = 923」，
+      容器 1091 居中、两侧各留 84px；而 width:100% 把这两侧留白吃掉撑到 1071，顶到屏幕边。
+      现在宽度由 --btv-lw 算出，想退回旧行为把 WIDE_FULL 置 true。
+   另外两处顺手修的：--btv-up 的基准换成 inner（宽屏下它是 sticky，才是 UP 面板真正的包含块，
+   原来拿右栏当基准只是因为两者矩形碰巧重合）；byWidth 改成从算出来的宽度推导，不再去量被
+   自己 CSS 撑开的 #playerWrap——那是读自己刚写的值，一旦测量早于 CSS 生效就会掉到下限 360px。
+
+   1.7.1 又修三处：
+   5. 宽屏下 UP 主卡片压在标题上。左栏被撑到播放器那么宽之后，标题和 meta 行跟着变成整行，
+      而 UP 卡片是绝对定位钉在这一行右侧的——B 站原生宽屏里标题区只有左栏原生宽度（543），
+      两者中间隔着一大段，根本不会撞，是我们撑宽以后才撞的，实测重叠 150px。
+   6. 窗口尺寸变了、但那一刻播放器正处在 mini 或全屏态时，layoutWide 会在量左栏之前就 return，
+      nativeLeftW 的缓存于是永久过期，宽屏宽度一直按旧窗口算（实测见过 1248 赖在该是 923 的位置上，
+      要等下一次碰巧经过 normal 才自愈）。现在 resize 只置脏标记，下次 layoutWide 补测。
+   7. 禁用小窗模式，见下面 b_miniplayer 那句和 CSS 里的兜底。
+
+   1.7.2 三处都是量出来的：
+   8. 非宽屏时整个布局顶满视口、左栏贴到 x=0。容器是 justify-content:center 且自带 10px 左右
+      padding，原生靠两侧各 22px 的留白把内容居中；而 slack 是拿 clientWidth（含 padding）直接
+      减出来的，把这段本该空着的留白也算成了「富余空间」，右栏于是从 350 撑到 393，正好吃满。
+      现在先扣掉 padding 和 SIDE_GUTTER，富余不够就老实退回原生的 350。
+   9. 宽屏时工具栏和标签栏之间空 48px：.video-resource-list 这类块在多数视频上是 0 高的占位，
+      却各自带着上下 24px 的 margin。原来那条 :empty 选不中它们（里面有个空的子节点）。
+  10. 宽屏时 UP 卡片看着没贴右——容器右边缘其实早就和播放器齐平了，是关注按钮在自己那行里
+      靠左排，右边空出 133px。现在让按钮行右对齐（按钮会从撑开的 200px 收回到内容宽度）。
+   顺带把 measureLeft 收紧成只在宽屏态下量：实测 B 站给左栏的宽度两种模式不一样（普通 668、
+   宽屏 543），拿普通模式的值去算宽屏宽度会多 125px。当前时序下碰巧没踩到，但不能指望它。
+
+   1.7.3 只修一件事：1.7.2 那条关注按钮的规则是错的。按钮行是三层结构，
+   而宽度上限 max-width:200px 挂在最里面的 .follow-btn 上；flex:0 0 auto 把中间层压成了
+   纯文字宽度 77px，按钮挤成一小块。改法见下面 --btv-followw 那段注释。
+
+   1.7.4 也只修一件事：UP 卡片宽度从固定的 --btv-rw 改成 max-content。
+   固定宽度下卡片 350 宽，而里面的内容只占得下 260——头像钉在最左边、文字和按钮贴在右边，
+   中间白白空出 90px，整张卡片散成两半，看着就像头像没跟着右对齐。
+
+   1.7.5 新增自动宽屏，见 AUTO_WIDE_UNDER 和 maybeAutoWide。
+   ──────────────────────────────────────────────────────────────────── */
+
 (() => {
   'use strict';
 
   // 主页只注入样式，不运行视频页的标签栏和轮询逻辑。
-  // 注意：hostname 必须是裸域名字符串，之前写成 markdown 链接形式会导致这个分支永远不成立。
+  // hostname 必须是裸域名字符串。1.6.x 这里写成了 markdown 链接形式，分支永远不成立。
   if (location.hostname === 'www.bilibili.com' && location.pathname === '/') {
     const style = document.createElement('style');
     style.id = 'btv-home-style';
@@ -88,6 +137,12 @@
     return;
   }
 
+  // 禁用小窗模式。B 站把这个开关存在 localStorage 的 b_miniplayer 里，'0' = 关。
+  // 实测它为 '0' 时，播放中把播放器滚出视口也不会弹小窗（滚到 y=-639 仍然是 wide，
+  // .bpx-player-mini-warp 保持 display:none，页面上找不到任何 position:fixed 的播放器节点）。
+  // 每次进页面都写一遍，免得被播放器设置面板或别的端同步改回去；CSS 里还有一层兜底。
+  try { localStorage.setItem('b_miniplayer', '0'); } catch {}
+
   // ────────────────────────────────────────────────────────────────────────
   // 布局适配层
   //
@@ -138,8 +193,12 @@
     sticky:    false,
   };
 
-  const RIGHT_W = 420;
+  const RIGHT_W = 420;            // 非宽屏时右栏加宽的上限
+  const RIGHT_NATIVE = 350;       // B 站右栏原生宽度；宽屏宽度 = 原生左栏 + 栏间距 + 这个值
+  const WIDE_FULL = false;        // true = 宽屏时播放器占满容器（1.6.x 的旧行为，会吃掉页面两侧留白）
   const TOP = 64;                 // B 站顶栏高度（两种页面一致）
+  const SIDE_GUTTER = 24;         // 非宽屏时右栏加宽后，页面两侧至少要留下的边距
+  const AUTO_WIDE_UNDER = 700;    // 普通模式下播放器窄于这个值就自动切宽屏；设 0 关掉
   const WIDE_BOTTOM = 48;         // 宽屏播放器底部留白：24 刚好塞满一屏，48 让标签栏露出一截，100+ 接近 B 站原生保守尺寸
   const STORE_KEY = 'btv-tab';
 
@@ -163,8 +222,8 @@
 
     /* 布局：右栏加宽。注意左栏宽度绝对不能动——B 站是先按窗口和高度算出播放器尺寸，再把左栏设成播放器那么宽；
        强行把左栏撑宽只会让播放器右边留出一条黑色空白（#playerWrap 的黑底）。
-       右栏宽度取「本来就空着的富余空间」，最多 ${RIGHT_W}px、最少还原成 B 站的 350px，由 JS 写进 --btv-rw */
-    ${L.container} ${L.right}{width:var(--btv-rw,350px)!important;flex:0 0 auto}
+       右栏宽度取「本来就空着的富余空间」，最多 ${RIGHT_W}px、最少还原成 B 站的 ${RIGHT_NATIVE}px，由 JS 写进 --btv-rw */
+    ${L.container} ${L.right}{width:var(--btv-rw,${RIGHT_NATIVE}px)!important;flex:0 0 auto}
     /* 播放器尺寸不碰：B 站按窗口宽算的播放器会比缩窄后的左栏宽几个像素，吃进栏间距里看不出来；
        强行 width:100% 会把宽屏模式一起废掉 */
     /* 面板整体钉住不动：UP 主卡片和标签栏固定，只有下面当前那个内容块自己滚
@@ -178,7 +237,7 @@
     ` : `
     /* 普通视频页：右栏高度正好等于一屏，父元素没有多余高度，sticky 粘不住，只能用 fixed。
        横向位置由 JS 写进 --btv-rx（跟着右栏原本的位置走）。 */
-    html:not(.btv-wide) ${L.inner}{position:fixed!important;top:${TOP}px!important;left:var(--btv-rx,auto)!important;width:var(--btv-rw,350px)!important}
+    html:not(.btv-wide) ${L.inner}{position:fixed!important;top:${TOP}px!important;left:var(--btv-rx,auto)!important;width:var(--btv-rw,${RIGHT_NATIVE}px)!important}
     /* 面板脱离文档流后右栏高度归零，页面底部会露出灰色页面底色；把右栏在流里的高度补回一屏 */
     html:not(.btv-wide) ${L.container} ${L.right}{height:calc(100vh - ${TOP}px)}
     `}
@@ -338,22 +397,72 @@
        藏掉这个容器，下面的 JS 再把输入框搬回评论区头部 */
     ${L.right}>.bili-comments-bottom-fixed-wrapper{display:none!important}
 
+    /* 禁用小窗的兜底。主开关是上面写进 localStorage 的 b_miniplayer='0'；
+       万一哪天 B 站换了开关的存法、mini 态真来了，这里把它按回原位。
+       只还原定位和层级，尺寸交给下面各自的规则，免得把播放器压成 0 高；
+       绝不去改它的 data-screen——那会让 B 站的内部状态机和 DOM 对不上，比小窗本身更麻烦。 */
+    .bpx-player-container[data-screen="mini"]{position:relative!important;inset:auto!important;
+      z-index:auto!important;transform:none!important;box-shadow:none!important;border-radius:0!important}
+    .bpx-player-container[data-screen="mini"] .bpx-player-mini-warp{display:none!important}
+    html.btv-wide .bpx-player-container[data-screen="mini"]{width:100%!important;height:var(--btv-ph)!important}
+
     /* 宽屏模式（仿 Tabview 的剧场模式）：两栏换行，播放器铺满整行，标签面板整行宽放在播放器下面、自己滚。
        B 站宽屏时播放器宽高是按窗口算死的，这里改成跟着左栏走，高度 = 宽*9/16 + 46px 控制栏，由 JS 写进 --btv-ph */
-    html.btv-wide ${L.container}{flex-wrap:wrap}
-    html.btv-wide ${L.container} ${L.left}{width:100%!important;position:relative!important;top:0!important}
-    html.btv-wide ${L.container} ${L.right}{width:100%!important;margin-left:0!important;margin-top:0!important;align-self:auto!important}
+    html.btv-wide ${L.container}{flex-wrap:wrap;justify-content:center}
+    /* 宽度不再用 100%。B 站原生宽屏的定义是「播放器横跨原本的左栏 + 栏间距 + 右栏」，
+       实测 543 + 30 + 350 = 923，容器 1091 居中后两侧各留 84px；
+       而 width:100% 会把这两侧留白整个吃掉撑到 1071，比原生宽 148px，顶到屏幕边——
+       这就是「宽屏的时候不是这么宽」的由来。--btv-lw 由 layoutWide 算出，
+       想退回旧的满宽行为把上面的 WIDE_FULL 置 true 即可。 */
+    html.btv-wide ${L.container} ${L.left}{width:var(--btv-lw,100%)!important;position:relative!important;top:0!important}
+    html.btv-wide ${L.container} ${L.right}{width:var(--btv-lw,100%)!important;margin-left:0!important;margin-top:0!important;align-self:auto!important}
     html.btv-wide #btv-tabs{margin-top:0}
+    /* 左栏里除了标题区、播放器、工具栏以外的块（.video-resource-list、广告位之类），在多数视频上
+       都是 0 高的占位，却各自带着上下 24px 的 margin，在工具栏和标签栏之间留出 48px 空档。
+       :empty 选不中它们——里面有个空的子节点——所以改成点名保留那三个真正有内容的，其余清零。 */
     html.btv-wide ${L.left}>*:empty{margin:0!important}
+    html.btv-wide ${L.left}>*:not(#viewbox_report):not(#playerWrap):not(#arc_toolbar_report){margin-top:0!important;margin-bottom:0!important}
     /* 宽屏下 UP 卡片是绝对定位跑到页面右上角的，面板若还 overflow:hidden 会把它裁掉——
        内容块各自有滚动条，这里放开不影响布局 */
     html.btv-wide ${L.inner}{position:sticky!important;top:${TOP}px!important;overflow:visible!important}
     html.btv-wide #btv-tabs{top:0}
     /* 宽屏时 UP 主卡片留在页面右上角（B 站原位），不跟面板一起掉到播放器下面；
-       它的包含块是右栏，所以要用 JS 算出负的 top 把它顶回标题那一行 */
+       它的包含块是 ${L.inner}——宽屏下这个元素是 sticky，属于 positioned element，
+       所以负的 top 要以它为基准算（1.6.x 拿右栏当基准只是因为两者矩形碰巧完全重合） */
     html.btv-wide ${L.container}{position:relative}
-    html.btv-wide .up-panel-container{position:absolute;top:var(--btv-up,0px);right:0;width:var(--btv-rw,350px);pointer-events:auto}
+    /* 宽度用 max-content 而不是固定的 --btv-rw：固定宽度下卡片 350 宽，但内容只占 260，
+       头像被钉在最左边（x=657）、按钮贴在右边（x=807），中间空出 90px，整张卡片散成两半。
+       收缩到内容宽度后整块 260，头像右移到 747、和文字间距 12px，
+       文字区与按钮同为 200 宽、右边缘一起落在播放器右边缘上。
+       max-width 仍用 --btv-rw 兜底：UP 名字或签名很长时，最多回到原来那个宽度。 */
+    html.btv-wide .up-panel-container{position:absolute;top:var(--btv-up,0px);right:0;
+      width:max-content;max-width:var(--btv-rw,${RIGHT_NATIVE}px);pointer-events:auto}
     html.btv-wide #playerWrap,html.btv-wide #bilibili-player,html.btv-wide .bpx-player-container[data-screen="wide"]{width:100%!important;height:var(--btv-ph)!important}
+    /* 标题别钻到 UP 卡片底下。左栏撑宽之后标题和 meta 行跟着变成整行，而 UP 卡片是绝对定位
+       钉在这一行右侧的；B 站原生宽屏里标题区只有左栏原生宽度，中间隔着一大段，所以原生不会撞。
+       注意不能只给 #viewbox_report 加 padding-right——实测 meta 行会缩，h1 不会，
+       标题那条链上有自己的宽度来源，父级的 padding 管不到它。
+       所以直接给整条链一个绝对上限 lw - rw - 16，标题正好在卡片左侧留 16px 截断
+       （h1 自带 text-overflow:ellipsis，会出省略号）。 */
+    html.btv-wide #viewbox_report .video-info-title,
+    html.btv-wide #viewbox_report .video-info-title-inner,
+    html.btv-wide #viewbox_report h1.video-title,
+    html.btv-wide #viewbox_report .video-info-detail-list{
+      max-width:calc(var(--btv-lw,100%) - var(--btv-rw,${RIGHT_NATIVE}px) - 16px)!important}
+    /* UP 卡片贴齐视频右边缘。卡片容器本来就是 right:0，右边缘早就和播放器齐平了；
+       是关注按钮在自己那一行里靠左排、右边空出 90px，看着才像整张卡片没贴边。
+       按钮行是三层：.up-info__btn-panel（整行 290）> .upinfo-btn-panel > .follow-btn，
+       而 max-width:200px 挂在最里面那层 .follow-btn 上——CSS 读不到子孙的值，
+       所以由 layoutWide 把它抄进 --btv-followw。
+       1.7.2 用 flex:0 0 auto 去压中间层是错的：它会一路缩到纯文字宽度 77px，按钮挤成一小块。
+       而 justify-content、auto margin、连 row-reverse 都推不动它——实测只要按钮是被 max-width
+       从更大的值压下来的，Chrome 就不把剩下那 90px 当自由空间，三种写法按钮都停在原位。
+       只有给出确定宽度才行：把整行宽度直接设成按钮的上限，再用 margin-left:auto 推到右边，
+       按钮保持原生的 200px，右边缘正好落在播放器右边缘上。
+       抄不到上限时退回 100%，那种情况下按钮本来就撑满整行，右边缘同样是齐的。 */
+    html.btv-wide .up-panel-container .up-info__btn-panel{width:var(--btv-followw,100%)!important;
+      margin-left:auto!important;margin-right:0!important}
+    html.btv-wide .up-panel-container .up-info__btn-panel>*{flex:1 1 auto!important}
 
     ${TABS.map(t => `html[data-btv-tab]:not([data-btv-tab="${t.name}"]) ${L.inner} ${t.sel}{display:none!important}`).join('\n')}
     ${L.rcmdShell ? `
@@ -438,16 +547,65 @@
   // 宽屏切换：跟着播放器的 data-screen 走；切换后让播放器重算尺寸，并把面板滚回顶部。
   // 只认 normal / wide 两个值：播放器滚出视口时 B 站会把它切成 mini（小窗），全屏是 web / full，
   // 这些都不是用户在换布局，布局必须保持不动——否则 mini 一出现布局塌回两栏、滚动位置跳掉、播放器又回到视口，来回抽搐。
-  let lastWide = null;
-  function layoutWide() {
+  let lastWide = null, nativeLeftW = 0, leftDirty = false;
+
+  // B 站按窗口尺寸算出来的左栏宽度（= 普通模式下的播放器宽），宽屏下这个值它自己不改。
+  // 只有在我们还没接管左栏宽度时才读得到：一旦加上 btv-wide，width 就来自 --btv-lw，
+  // 再读 offsetWidth 就是在读自己刚写进去的值。所以平时用缓存，只有 resize 时才摘掉 class 重测一次——
+  // 摘了立刻加回去，同一个任务内完成，浏览器不会绘制中间态，代价只是一次强制回流。
+  function measureLeft(lc, html, remeasure) {
+    if (!lc) return;
+    if (!html.classList.contains('btv-wide')) { nativeLeftW = lc.offsetWidth; leftDirty = false; return; }
+    if (!remeasure && !leftDirty && nativeLeftW) return;
+    html.classList.remove('btv-wide');
+    nativeLeftW = lc.offsetWidth;
+    html.classList.add('btv-wide');
+    leftDirty = false;
+  }
+
+  // ── 自动宽屏 ──────────────────────────────────────────────────────────
+  // 左右栏布局下右栏是一笔固定开销（350 宽 + 30 的栏间距），窗口一窄，这笔开销的占比就压过
+  // 播放器本身：实测 1091 的窗口里普通模式播放器只剩 668，切到宽屏是 923，白捡 255px。
+  // 所以低于阈值就替用户切过去。
+  // 只做单向（普通 → 宽屏）。要自动切回来，就得在宽屏状态下估算「切回普通会有多宽」，
+  // 而 B 站两种模式给左栏的宽度本来就不是一回事（实测 668 / 543），估不准；一旦估错，
+  // 两种模式之间会来回跳，比不自动更难受。窗口变宽后想回普通模式，手点一下就是了。
+  // 另外用户只要自己点过一次宽屏按钮，本页就不再自动，免得跟他抢方向盘。
+  let autoSwitching = false, userTookOver = false;
+
+  document.addEventListener('click', e => {
+    // 我们自己触发的那一次 click 不算「用户接管」
+    if (!autoSwitching && e.target?.closest?.('.bpx-player-ctrl-wide')) userTookOver = true;
+  }, true);
+
+  function maybeAutoWide(playerW) {
+    if (!AUTO_WIDE_UNDER || userTookOver || autoSwitching) return;
+    if (!playerW || playerW >= AUTO_WIDE_UNDER) return;
+    const btn = $('.bpx-player-ctrl-wide');
+    if (!btn) return;
+    autoSwitching = true;
+    btn.click();
+    // 切换要走 B 站自己的一轮重排，这期间别让第二次点击挤进来
+    setTimeout(() => { autoSwitching = false; }, 600);
+  }
+
+  function layoutWide(remeasure) {
     const p = $('.bpx-player-container'), pw = $('#playerWrap'), inner = $(L.inner);
     if (!p || !pw || !inner) return;
     const screen = p.dataset.screen;
     if (screen !== 'wide' && screen !== 'normal') return;
     const wide = screen === 'wide';
-    document.documentElement.classList.toggle('btv-wide', wide);
+    const html = document.documentElement;
     const rc0 = $(L.right), lc0 = $(L.left), vc0 = $(L.container);
-    const root0 = document.documentElement.style;
+    const root0 = html.style;
+    const gap = rc0 ? (parseFloat(getComputedStyle(rc0).marginLeft) || 30) : 30;
+
+    // 必须赶在 toggle 之前量：此刻 btv-wide 还没加上（或本来就没有），左栏还是 B 站的原生宽度。
+    // 只在宽屏态下量：实测 B 站给左栏的宽度两种模式不是一回事（普通模式 668、宽屏 543），
+    // 拿普通模式的值去算宽屏宽度会多出 125px，照样顶到窗口边。
+    if (wide) measureLeft(lc0, html, remeasure);
+    html.classList.toggle('btv-wide', wide);
+
     // UP 主面板的高度 = 左栏里播放器上方那块（标题区）的高度，这样标签栏顶边正好压在播放器顶边上。
     // 两个节点都在文档流里、跟着页面一起滚，差值与滚动位置无关，随便什么时候量都对。
     // 放在 wide 分支外，宽屏模式也要用它算播放器可用高度。
@@ -458,28 +616,50 @@
     }
     if (rc0 && lc0 && vc0) {
       if (!wide) {
-        // 富余空间 = 整行宽 - 左栏（播放器）宽 - 栏间距，超出的部分才用来加宽右栏。
-        // 栏间距从右栏的实际 margin-left 读，不再写死 30，两种页面通用。
-        const gap = parseFloat(getComputedStyle(rc0).marginLeft) || 30;
-        const slack = vc0.clientWidth - lc0.offsetWidth - gap;
-        root0.setProperty('--btv-rw', Math.round(Math.max(350, Math.min(RIGHT_W, slack))) + 'px');
+        // 富余空间 = 整行宽 - 两侧边距 - 左栏（播放器）宽 - 栏间距，超出的才拿来加宽右栏。
+        // clientWidth 是含容器自身左右 padding 的，而容器是 justify-content:center，
+        // 原生本来就靠两侧留白把内容居中（实测各 22px）。1.7.1 之前两笔都没扣，
+        // 把该空着的留白也当成富余，右栏从 350 撑到 393 正好顶满视口、左栏贴到 x=0，
+        // 这就是「非宽屏时内容紧贴左边」。富余不够时下面的 max 会老实退回原生的 350。
+        const cs0 = getComputedStyle(vc0);
+        const padX = (parseFloat(cs0.paddingLeft) || 0) + (parseFloat(cs0.paddingRight) || 0);
+        const slack = vc0.clientWidth - Math.max(padX, SIDE_GUTTER * 2) - lc0.offsetWidth - gap;
+        root0.setProperty('--btv-rw', Math.round(Math.max(RIGHT_NATIVE, Math.min(RIGHT_W, slack))) + 'px');
       }
       root0.setProperty('--btv-rx', Math.round(rc0.getBoundingClientRect().left) + 'px');
     }
     if (wide !== lastWide) {
       lastWide = wide;
+      // 刚切过来这一下 B 站可能还没把左栏宽度改到位，缓存一律按脏处理，下一趟补测。
+      leftDirty = true;
       inner.scrollTop = 0;
       window.dispatchEvent(new Event('resize'));
     }
-    if (wide) {
-      const root = document.documentElement.style;
-      const byWidth = pw.getBoundingClientRect().width * 9 / 16 + 46;
+    if (wide && vc0) {
+      // 宽屏宽度 = 原生左栏 + 栏间距 + 右栏原生宽。实测 543 + 30 + 350 = 923，
+      // 容器 1091 是居中 flex，剩下的 168 自动分成两侧各 84px 的留白——这就是 B 站原生的观感。
+      // nativeLeftW 万一没量到（理论上不会，首次调用时 class 还没加），退回按容器宽反推。
+      const base = nativeLeftW || Math.max(0, vc0.clientWidth - RIGHT_NATIVE - gap);
+      const lw = Math.round(WIDE_FULL ? vc0.clientWidth : base + gap + RIGHT_NATIVE);
+      root0.setProperty('--btv-lw', lw + 'px');
+      // byWidth 直接从 lw 推，不再去量 #playerWrap：那个宽度正是我们自己 width:100% 撑出来的，
+      // 读的是自己刚写的值。稳态下自洽，可一旦测量早于 CSS 生效，byWidth 就掉到原生左栏那一档，
+      // 被 Math.max(360,…) 接住，播放器被钉成 360px 高。
+      const byWidth = lw * 9 / 16 + 46;
       // 可用高度 = 视口 - 顶栏 - 标题区 - 底部留白（留白让标签栏能露出一截，提示下面还有东西）
       const byView = window.innerHeight - TOP - gapTop - WIDE_BOTTOM;
-      root.setProperty('--btv-ph', Math.round(Math.max(360, Math.min(byWidth, byView))) + 'px');
-      const rc = $(L.right), vc = $(L.container);
-      if (rc && vc) root.setProperty('--btv-up', (vc.getBoundingClientRect().top - rc.getBoundingClientRect().top) + 'px');
+      root0.setProperty('--btv-ph', Math.round(Math.max(360, Math.min(byWidth, byView))) + 'px');
+      // 关注按钮的宽度上限藏在 .up-info__btn-panel 的孙子节点上，CSS 选择器没法把子孙的值
+      // 拿给祖先用，只能在这里抄一份出来（详见上面那段 CSS 注释）。
+      const fb = $('.up-info__btn-panel .follow-btn, .up-info__btn-panel .default-btn');
+      const fw = fb ? parseFloat(getComputedStyle(fb).maxWidth) : NaN;
+      root0.setProperty('--btv-followw', fw > 0 ? fw + 'px' : '100%');
+      // UP 卡片的包含块是 inner（宽屏下它是 sticky，属于 positioned element），不是右栏。
+      root0.setProperty('--btv-up', Math.round(vc0.getBoundingClientRect().top - inner.getBoundingClientRect().top) + 'px');
     }
+    // 普通模式下播放器被右栏挤得太窄，就替用户切到宽屏。放在最后：此时 --btv-rw 等
+    // 都已经算过，切换引起的那次 data-screen 变化会让 layoutWide 从头再跑一遍。
+    if (!wide) maybeAutoWide(lc0 ? lc0.offsetWidth : 0);
   }
 
   // 哪些标签该显示（比如没合集就不显示合集）；当前标签没了就退回评论
@@ -489,7 +669,10 @@
     for (const b of tabsEl.children) {
       const t = TABS.find(t => t.name === b.dataset.tab);
       const el = inner.querySelector(t.sel);
-      b.hidden = !el || (t.name === '简介' && !el.children.length);
+      const v = !el || (t.name === '简介' && !el.children.length);
+      // 同值也要写的话会平白产生一条 attribute 记录（实测连写三次 hidden=true 收到三条），
+      // 观察者一旦放开属性过滤就会自激。这里先比对再写，把隐患掐在源头。
+      if (b.hidden !== v) b.hidden = v;
     }
     const cur = tabsEl.querySelector(`button[data-tab="${document.documentElement.dataset.btvTab}"]`);
     if (!cur || cur.hidden) setTab('评论');
@@ -532,9 +715,40 @@
       if (pending) return;
       pending = setTimeout(() => { pending = 0; adopt(); refresh(); layoutWide(); styleCommentHeader(); }, 100);
     };
-    new MutationObserver(sync).observe($(L.container) || document.body,
-      { childList: true, subtree: true, attributes: true, attributeFilter: ['data-screen'] });
-    window.addEventListener('resize', layoutWide);
+
+    // 观察范围只要左栏和右栏：简介/评论被 Vue 重建发生在左栏，标签内容的增删发生在右栏。
+    // 1.6.x 观察的是整个 ${L.container}，而 #playerWrap 就在它的 subtree 里——实测播放中
+    // 4 秒收到 16 条记录，全部来自 .bpx-player-ctrl-time-current（时间码每 250ms 换一次文本节点），
+    // 光这一个节点就让 sync 以 4Hz 常驻，每次带一组 getBoundingClientRect 强制回流（单次约 3.6ms）。
+    // 所以再加一道过滤：落在播放器内部的记录一律跳过，剩下的才值得跑一次 sync。
+    const mo = new MutationObserver(ms => {
+      const pwNow = $('#playerWrap');
+      for (const m of ms) {
+        if (pwNow && pwNow.contains(m.target)) continue;
+        sync();
+        return;
+      }
+    });
+    for (const sel of [L.left, L.right]) {
+      const el = $(sel);
+      if (el) mo.observe(el, { childList: true, subtree: true });
+    }
+    // 兜底：万一 B 站把整个左栏或右栏节点换掉，上面两个观察目标就失联了。
+    // 只看容器的直接子节点，成本可以忽略。
+    const vcEl = $(L.container);
+    if (vcEl) mo.observe(vcEl, { childList: true });
+
+    // data-screen 在 .bpx-player-container 上，正好落在上面被过滤掉的区域里，所以单独盯一个。
+    // 只看这一个属性、不看子树，播放器内部的 DOM 变动一条都不要；
+    // 直接调 layoutWide 而不是走 sync，省掉 100ms 防抖带来的布局闪烁。
+    const pcEl = $('.bpx-player-container');
+    if (pcEl) new MutationObserver(() => layoutWide()).observe(pcEl, { attributes: true, attributeFilter: ['data-screen'] });
+
+    // 窗口尺寸变了，B 站会重算原生左栏宽度，缓存的 nativeLeftW 就过期了。
+    // 这里只置脏标记再调用：如果这一刻播放器正好在 mini 或全屏态，layoutWide 会在量左栏之前
+    // 就 return，标记留着，下一次 layoutWide（无论由谁触发）会把这次重测补上。
+    // 1.7.0 直接传 true，那一次被 return 掉之后缓存就永久过期了。
+    window.addEventListener('resize', () => { leftDirty = true; layoutWide(true); });
 
     // 连播页换下一个视频时路径不变、只改 ?bvid=，属于 SPA 内部跳转，不会重新执行脚本。
     // MutationObserver 大多数情况能兜住（Vue 会重建节点），但有些切换只改内容不动结构，
@@ -578,9 +792,12 @@
 
   let settledAt = 0, tries = 0, waited = 0;
   const timer = setInterval(() => {
-    waited += 100;
+    // waited 必须在这道门禁之后才累加。1.6.x 把它放在最前面，于是「后台打开视频、二十秒后切回来」
+    // 这条路径上 waited 早已超过 12000，下面的 12 秒兜底直接短路掉 pageSettled，
+    // 立刻 build、立刻搬 DOM——上面那一大段注释防的就是这个崩溃，却被计时器自己放了进来。
     if (document.readyState !== 'complete' || document.hidden) { settledAt = 0; return; }
-    // 信号迟迟不来也别干等（比如关闭了评论区、或 B 站改版换了 class），12 秒后照常构建
+    waited += 100;
+    // 信号迟迟不来也别干等（比如关闭了评论区、或 B 站改版换了 class），累计可见 12 秒后照常构建
     if (!pageSettled() && waited < 12000) { settledAt = 0; return; }
     if (!settledAt) { settledAt = Date.now(); return; }
     if (Date.now() - settledAt < 150) return;
