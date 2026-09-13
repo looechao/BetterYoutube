@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bilibili Tabview
 // @namespace    looechao
-// @version      1.7.8
+// @version      1.8.0
 // @description  B 站视频页/连播页右栏标签化，主页三列精简布局，动态页纯色背景，隐藏广告（仿 Tabview YouTube）
 // @match        https://www.bilibili.com/
 // @match        https://www.bilibili.com/?*
@@ -78,6 +78,10 @@
       （非宽屏只有 104 / 22）。那块地是它留给自己把创作团队面板放到标题上方用的，
       而我们已经把面板挪到右上角，66px 就纯空着白推播放器。压回内容高度后播放器上移 66px。
 
+   1.8.0 = 1.7.8 + 顶栏入口精简。1.7.9 试过的「顶栏自动隐藏」按要求撤掉了，
+   TOP 保持 64，整套布局和 1.7.8 一致；只留下砍掉几个用不上入口的那几行，
+   而且提到所有分支之前注入，首页、动态页、视频页一起生效。
+
    1.7.8 调这一块的观感：1.7.7 把标题区压到刚好等于成员卡片的高度，一点余量都没有，太挤。
    改成「成员卡片高度 + 上下各 TITLE_PAD」，再用 flex 把标题块在其中垂直居中；
    卡片那边本来就居中在同一个高度里，于是两条中心线重合——实测都落在 120，差 0。
@@ -85,6 +89,19 @@
 
 (() => {
   'use strict';
+
+  // 顶栏里用不上的入口。放在所有分支 return 之前注入，首页 / 动态页 / 视频页一起生效。
+  // 这些 li 的 class 全是同一个 v-popover-wrap，没法按类名区分，只能按 href 认。
+  // 想再砍「大赛」或「下载客户端」，照着加一行就行（分别是 blackboard/era 和 app.bilibili.com）。
+  const navStyle = document.createElement('style');
+  navStyle.id = 'btv-nav';
+  navStyle.textContent = `
+    .bili-header .left-entry li:has(a[href*="game.bilibili.com"]),
+    .bili-header .left-entry li:has(a[href*="show.bilibili.com"]),
+    .bili-header .left-entry li:has(a[href*="manga.bilibili.com"]),
+    .bili-header .left-entry li:has(a[href*="/match/home"]){display:none!important}
+  `;
+  (document.head || document.documentElement).appendChild(navStyle);
 
   // 主页只注入样式，不运行视频页的标签栏和轮询逻辑。
   // hostname 必须是裸域名字符串。1.6.x 这里写成了 markdown 链接形式，分支永远不成立。
