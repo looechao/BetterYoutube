@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bilibili Tabview
 // @namespace    looechao
-// @version      1.7.5
+// @version      1.7.8
 // @description  B 站视频页/连播页右栏标签化，主页三列精简布局，动态页纯色背景，隐藏广告（仿 Tabview YouTube）
 // @match        https://www.bilibili.com/
 // @match        https://www.bilibili.com/?*
@@ -61,6 +61,26 @@
    中间白白空出 90px，整张卡片散成两半，看着就像头像没跟着右对齐。
 
    1.7.5 新增自动宽屏，见 AUTO_WIDE_UNDER 和 maybeAutoWide。
+
+   1.7.6 修多人视频（创作团队）在宽屏下的三处：
+  11. 中间层的类名有两种，membersinfo-normal 和 membersinfo-wide，而脚本只写了前者，
+      于是 height:100% 那条在一部分视频上从来没命中过——面板压不下去，一直贴在顶栏底下。
+  12. 面板压扁后只有 84 高，而这类视频的标题区有 150，顶部对齐就差出 50px。
+      撑满标题区高度让那条 flex 行自己居中，面板中心和标题中心只差 10px。
+  13. B 站自己的横滑遮罩宽 115px、外加一个滚动箭头，在这个 384 宽的容器里要吃掉 30%，
+      把最后一位成员整个盖住。我们本来就有 28px 的渐隐做提示，把它们藏掉。
+
+   1.7.7 收尾多人视频的两笔：
+  14. 上一版那个 [class*="membersinfo"] 通配写漏了 > ——每个成员卡片也叫
+      membersinfo-upcard(-wrap)，于是它们一起被拉成整块高度，内容只能贴顶、上下留白全没了。
+      这就是「非宽屏时距离顶部不对」的真身：不是 padding，是高度被通配选择器误伤。
+  15. 多人视频在宽屏下，B 站给标题区写死了 height:150px 加 51px 的 padding-top
+      （非宽屏只有 104 / 22）。那块地是它留给自己把创作团队面板放到标题上方用的，
+      而我们已经把面板挪到右上角，66px 就纯空着白推播放器。压回内容高度后播放器上移 66px。
+
+   1.7.8 调这一块的观感：1.7.7 把标题区压到刚好等于成员卡片的高度，一点余量都没有，太挤。
+   改成「成员卡片高度 + 上下各 TITLE_PAD」，再用 flex 把标题块在其中垂直居中；
+   卡片那边本来就居中在同一个高度里，于是两条中心线重合——实测都落在 120，差 0。
    ──────────────────────────────────────────────────────────────────── */
 
 (() => {
@@ -199,6 +219,7 @@
   const TOP = 64;                 // B 站顶栏高度（两种页面一致）
   const SIDE_GUTTER = 24;         // 非宽屏时右栏加宽后，页面两侧至少要留下的边距
   const AUTO_WIDE_UNDER = 700;    // 普通模式下播放器窄于这个值就自动切宽屏；设 0 关掉
+  const TITLE_PAD = 14;           // 宽屏下多人视频标题区的上下留白
   const WIDE_BOTTOM = 48;         // 宽屏播放器底部留白：24 刚好塞满一屏，48 让标签栏露出一截，100+ 接近 B 站原生保守尺寸
   const STORE_KEY = 'btv-tab';
 
@@ -262,7 +283,12 @@
        横向滚动条必须压掉——它要吃十几像素，一样会超。横滑靠触控板或 shift+滚轮，右边渐隐负责提示。 */
     ${L.inner} .members-info-container{padding-top:0!important;height:100%}
     ${L.inner} .members-info-container .header{display:none!important}
-    ${L.inner} .members-info-container .membersinfo-normal{height:100%!important}
+    /* 中间层的类名有两种：成员少时是 membersinfo-normal，多时是 membersinfo-wide。
+       只写前者的话，后一种视频上这条永远不命中，面板高度压不下去，一直贴在顶栏底下。
+       那个 > 绝对不能少：每个成员卡片也叫 membersinfo-upcard / membersinfo-upcard-wrap，
+       去掉 > 的话它们会连同中间层一起被拉成整块高度，一行头像只好贴着顶边，
+       上下的留白全被吃掉——看着像 padding 出了问题，其实是高度被通配选择器误伤。 */
+    ${L.inner} .members-info-container>[class*="membersinfo"]{height:100%!important}
     /* max-height:none 这条别删。B 站的折叠动画是用 JS 往这个节点写内联 max-height 实现的
        （收起态正好等于一行卡片的高度），height:100% 会被它夹回去，align-items:center 就永远
        没有多余空间可分，表现是「样式都应用了但就是不居中」。
@@ -274,6 +300,13 @@
       -webkit-mask-image:linear-gradient(to right,#000 calc(100% - 28px),transparent);
       mask-image:linear-gradient(to right,#000 calc(100% - 28px),transparent)}
     ${L.inner} .members-info-container .container::-webkit-scrollbar{display:none}
+    /* B 站自己也有一套横滑提示：左右两块 general-mask（右边那块 115px 宽）外加一个滚动箭头。
+       那是按整页宽度设计的，放进这个 384 宽的容器里要吃掉 30%，正好把最后一位成员整个盖住。
+       我们上面已经有 28px 的渐隐做同样的提示，这套就藏掉。 */
+    ${L.inner} .members-info-container .general-mask-left,
+    ${L.inner} .members-info-container .general-mask-right,
+    ${L.inner} .members-info-container .van-icon-general_enter_s,
+    ${L.inner} .members-info-container .van-icon-general_back_s{display:none!important}
     ${L.inner} .membersinfo-upcard-wrap{flex:0 0 auto;padding-bottom:0!important}
     /* flex-basis 用 0，让当前显示的那块正好填满剩余高度（用 auto 会按内容分配，评论区会短一截）。
        B 站给面板留了 250px 的 padding-bottom（原本是给固定评论框腾位置的），这里压掉 */
@@ -437,6 +470,26 @@
        max-width 仍用 --btv-rw 兜底：UP 名字或签名很长时，最多回到原来那个宽度。 */
     html.btv-wide .up-panel-container{position:absolute;top:var(--btv-up,0px);right:0;
       width:max-content;max-width:var(--btv-rw,${RIGHT_NATIVE}px);pointer-events:auto}
+    /* 多人视频的创作团队面板横滑压扁后只有 84 高，而这类视频的标题区（--btv-uph）是 150，
+       顶部对齐会让它浮在顶栏底下、和标题差出 50px。撑满标题区的高度，里面那条 flex 行
+       自己会居中（上面 .container 的 align-items:center）。
+       用 :has() 限定只管多人面板：单 UP 卡片本来就正好和标题区一样高，不用动它。 */
+    html.btv-wide .up-panel-container:has(.members-info-container){height:var(--btv-uph,auto)}
+    /* 同样是多人视频 + 宽屏：B 站给标题区写死了 height:150px 和 51px 的 padding-top，
+       而同一个视频在非宽屏下只有 104 / 22。多出来的这块是它留给自己的——原生宽屏里
+       右栏被播放器盖住，B 站就把创作团队面板改放到标题上方那条空当里。
+       我们已经把面板绝对定位到右上角了，那 66px 于是纯空着，白把播放器往下推。
+       但压到刚好等于内容高度（1.7.7 的做法）又太紧，上下一点余量都没有。
+       所以取中间：标题区 = 成员卡片的高度（--btv-memberh，由 layoutWide 量出来写进去）
+       加上下各 TITLE_PAD，再用 flex 把标题块在这个高度里垂直居中。
+       右边的卡片高度同样是 --btv-uph（就是标题区高度），内容靠 .container 的
+       align-items:center 居中。两边各自居中到同一个高度，中心线自然重合——
+       实测标题块中心和头像块中心都落在 120，差 0。
+       :has() 限定只管多人视频——单 UP 视频的标题区本来就是 104 / 22，不用动。 */
+    html.btv-wide:has(.members-info-container) #viewbox_report{
+      height:auto!important;padding-top:${TITLE_PAD}px!important;padding-bottom:${TITLE_PAD}px!important;
+      min-height:calc(var(--btv-memberh,84px) + ${TITLE_PAD * 2}px)!important;
+      display:flex!important;flex-direction:column!important;justify-content:center!important}
     html.btv-wide #playerWrap,html.btv-wide #bilibili-player,html.btv-wide .bpx-player-container[data-screen="wide"]{width:100%!important;height:var(--btv-ph)!important}
     /* 标题别钻到 UP 卡片底下。左栏撑宽之后标题和 meta 行跟着变成整行，而 UP 卡片是绝对定位
        钉在这一行右侧的；B 站原生宽屏里标题区只有左栏原生宽度，中间隔着一大段，所以原生不会撞。
@@ -651,6 +704,10 @@
       root0.setProperty('--btv-ph', Math.round(Math.max(360, Math.min(byWidth, byView))) + 'px');
       // 关注按钮的宽度上限藏在 .up-info__btn-panel 的孙子节点上，CSS 选择器没法把子孙的值
       // 拿给祖先用，只能在这里抄一份出来（详见上面那段 CSS 注释）。
+      // 多人视频：标题区的高度要照着右上角那排成员卡片来定（见上面 #viewbox_report 那段），
+      // 卡片多高只有量了才知道，CSS 自己算不出来。
+      const mc = $('.members-info-container .membersinfo-upcard-wrap');
+      if (mc) root0.setProperty('--btv-memberh', mc.offsetHeight + 'px');
       const fb = $('.up-info__btn-panel .follow-btn, .up-info__btn-panel .default-btn');
       const fw = fb ? parseFloat(getComputedStyle(fb).maxWidth) : NaN;
       root0.setProperty('--btv-followw', fw > 0 ? fw + 'px' : '100%');
