@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bilibili Tabview
 // @namespace    looechao
-// @version      1.6.1
+// @version      1.6.2
 // @description  B 站视频页/连播页右栏标签化，主页三列精简布局，动态页纯色背景，隐藏广告（仿 Tabview YouTube）
 // @match        https://www.bilibili.com/
 // @match        https://www.bilibili.com/?*
@@ -140,6 +140,7 @@
 
   const RIGHT_W = 420;
   const TOP = 64;                 // B 站顶栏高度（两种页面一致）
+  const WIDE_BOTTOM = 48;         // 宽屏播放器底部留白：24 刚好塞满一屏，48 让标签栏露出一截，100+ 接近 B 站原生保守尺寸
   const STORE_KEY = 'btv-tab';
 
   // 标签 → 右栏里对应的节点。合集和推荐留在 Vue 原位不搬，只用 CSS 显隐；
@@ -446,8 +447,16 @@
     const wide = screen === 'wide';
     document.documentElement.classList.toggle('btv-wide', wide);
     const rc0 = $(L.right), lc0 = $(L.left), vc0 = $(L.container);
+    const root0 = document.documentElement.style;
+    // UP 主面板的高度 = 左栏里播放器上方那块（标题区）的高度，这样标签栏顶边正好压在播放器顶边上。
+    // 两个节点都在文档流里、跟着页面一起滚，差值与滚动位置无关，随便什么时候量都对。
+    // 放在 wide 分支外，宽屏模式也要用它算播放器可用高度。
+    let gapTop = 0;
+    if (lc0) {
+      gapTop = Math.round(pw.getBoundingClientRect().top - lc0.getBoundingClientRect().top);
+      if (gapTop > 0) root0.setProperty('--btv-uph', gapTop + 'px');
+    }
     if (rc0 && lc0 && vc0) {
-      const root0 = document.documentElement.style;
       if (!wide) {
         // 富余空间 = 整行宽 - 左栏（播放器）宽 - 栏间距，超出的部分才用来加宽右栏。
         // 栏间距从右栏的实际 margin-left 读，不再写死 30，两种页面通用。
@@ -456,10 +465,6 @@
         root0.setProperty('--btv-rw', Math.round(Math.max(350, Math.min(RIGHT_W, slack))) + 'px');
       }
       root0.setProperty('--btv-rx', Math.round(rc0.getBoundingClientRect().left) + 'px');
-      // UP 主面板的高度 = 左栏里播放器上方那块（标题区）的高度，这样标签栏顶边正好压在播放器顶边上。
-      // 两个节点都在文档流里、跟着页面一起滚，差值与滚动位置无关，随便什么时候量都对。
-      const gapTop = Math.round(pw.getBoundingClientRect().top - lc0.getBoundingClientRect().top);
-      if (gapTop > 0) root0.setProperty('--btv-uph', gapTop + 'px');
     }
     if (wide !== lastWide) {
       lastWide = wide;
@@ -468,7 +473,10 @@
     }
     if (wide) {
       const root = document.documentElement.style;
-      root.setProperty('--btv-ph', Math.round(pw.getBoundingClientRect().width * 9 / 16 + 46) + 'px');
+      const byWidth = pw.getBoundingClientRect().width * 9 / 16 + 46;
+      // 可用高度 = 视口 - 顶栏 - 标题区 - 底部留白（留白让标签栏能露出一截，提示下面还有东西）
+      const byView = window.innerHeight - TOP - gapTop - WIDE_BOTTOM;
+      root.setProperty('--btv-ph', Math.round(Math.max(360, Math.min(byWidth, byView))) + 'px');
       const rc = $(L.right), vc = $(L.container);
       if (rc && vc) root.setProperty('--btv-up', (vc.getBoundingClientRect().top - rc.getBoundingClientRect().top) + 'px');
     }
